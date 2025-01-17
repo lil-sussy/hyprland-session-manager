@@ -16,6 +16,7 @@ interface Window {
     size: [number, number];
     class: string;
     title: string;
+    floating: boolean;
 }
 
 interface SessionData {
@@ -38,7 +39,7 @@ export async function getCurrentSession(): Promise<SessionData> {
         const clientsJson = await executeHyprctl('clients -j');
 
         // Add debug logging
-        console.log('Raw hyprctl output:', clientsJson);
+        // console.log('Raw hyprctl output:', clientsJson);
 
         // Check if the output is empty or invalid
         if (!clientsJson.trim()) {
@@ -54,7 +55,7 @@ export async function getCurrentSession(): Promise<SessionData> {
             return { windows: [] };
         }
 
-        console.log('Parsed windows:', windows);
+        // console.log('Parsed windows:', windows);
         return { windows };
     } catch (error) {
         console.error('Error in getCurrentSession:', error);
@@ -79,95 +80,123 @@ function getApplicationCommand(windowClass: string): string {
 
 
 // Restore a saved session
+
 export async function restoreSession(sessionData: SessionData): Promise<void> {
-    try {
-        console.log('Starting session restore with data:', sessionData);
+	try {
+		console.log("Starting session restore with data:", sessionData);
 
-        if (!sessionData?.windows?.length) {
-            console.log('No windows to restore - session data is empty');
-            return;
-        }
+		if (!sessionData?.windows?.length) {
+			console.log("No windows to restore - session data is empty");
+			return;
+		}
 
-        // Get current active window (terminal running this command)
-        const activeWindow = await executeHyprctl('activewindow -j').then(JSON.parse);
+		// 1) Get the currently active window (the terminal running this command),
+		//    so we don't close it below
+		const activeWindow = await executeHyprctl("activewindow -j").then(JSON.parse);
 
-        // Close all windows except the active terminal
-        const initialSession = await getCurrentSession();
-        for (const window of initialSession.windows) {
-            if (window.address !== activeWindow.address) {
-                await executeHyprctl(`dispatch closewindow address:${window.address}`);
-            }
-        }
+		// 2) Close all other windows to start fresh
+		// const initialSession = await getCurrentSession();
+		// for (const w of initialSession.windows) {
+		// 	if (w.address !== activeWindow.address) {
+		// 		await executeHyprctl(`dispatch closewindow address:${w.address}`);
+		// 	}
+		// }
 
-        // Group windows by class to handle duplicates
-        const windowsByClass = sessionData.windows.reduce((acc, window) => {
-            if (!acc[window.class]) {
-                acc[window.class] = [];
-            }
-            acc[window.class].push(window);
-            return acc;
-        }, {} as Record<string, Window[]>);
+		// 3) Group saved windows by class
+		const windowsByClass = sessionData.windows.reduce<Record<string, Window[]>>((acc, window) => {
+			if (!acc[window.class]) {
+				acc[window.class] = [];
+			}
+			acc[window.class].push(window);
+			return acc;
+		}, {});
 
-        // Launch applications
-        const launchCommands = Object.entries(windowsByClass)
-            .flatMap(([windowClass, windows]) => {
-                return Array(windows.length).fill(`dispatch exec ${getApplicationCommand(windowClass)}`);
-            })
-            .join(' ; ');
+		// 4) Launch applications according to the number of saved windows
+		//    If class "firefox" had 3 windows saved, we dispatch exec firefox 3 times.
+		const launchCommands = Object.entries(windowsByClass)
+			.flatMap(([windowClass, windows]) => {
+				const cmd = getApplicationCommand(windowClass);
+				return Array(windows.length).fill(`dispatch exec ${cmd}`);
+			})
+			.join(" ; ");
 
-        if (launchCommands) {
-            await executeHyprctl(`--batch "${launchCommands}"`);
-        }
+		if (launchCommands) {
+			console.log("Launching applications ...");
+			await executeHyprctl(`--batch "${launchCommands}"`);
+		}
 
-        // Wait for windows to appear
-        console.log('Waiting for windows to appear...');
-        await new Promise(resolve => setTimeout(resolve, 1000));
+		// 5) Wait a few seconds for Hyprland to register the newly spawned windows
+		console.log("Waiting 3 seconds for apps to launch and register...");
+		await new Promise((resolve) => setTimeout(resolve, 3000));
 
-        // Get current windows to position them
-        const currentSession = await getCurrentSession();
+		// 6) Get the current windows after launch
+		const currentSession = await getCurrentSession();
 
-        // Group current windows by class
-        const currentWindowsByClass = currentSession.windows.reduce((acc, window) => {
-            if (!acc[window.class]) {
-                acc[window.class] = [];
-            }
-            acc[window.class].push(window);
-            return acc;
-        }, {} as Record<string, Window[]>);
+		// 7) Group newly launched windows by class
+		const currentWindowsByClass = currentSession.windows.reduce<Record<string, Window[]>>((acc, win) => {
+			if (!acc[win.class]) {
+				acc[win.class] = [];
+			}
+			acc[win.class].push(win);
+			return acc;
+		}, {});
 
-        // Position all windows in a single batch command
-        const positionCommands = Object.entries(windowsByClass)
-            .flatMap(([windowClass, savedWindows]) => {
-                const currentWindows = currentWindowsByClass[windowClass] || [];
-                return savedWindows.map((savedWindow, index) => {
-                    const currentWindow = currentWindows[index];
-                    if (!currentWindow) return [];
+		// 8) Build a batch of commands that:
+		//    - Moves each window to the correct workspace
+		//    - Toggles floating (if needed)
+		//    - Moves the window to the saved position
+		//    - Resizes the window to the saved size
+		//
+		//    We'll do it in one big batch to minimize flicker. We also
+		//    can embed a "focuswindow" command if we like, but typically
+		//    "focuswindow" is used individually.
+		const positionCommands = Object.entries(windowsByClass)
+			.flatMap(([windowClass, savedWindows]) => {
+				const currentWindows = currentWindowsByClass[windowClass] || [];
 
-                    const commands: string[] = [];
-                    if (savedWindow.workspace) {
-                        // #TODO: special workspaces don't work correctly
-                        commands.push(`dispatch movetoworkspace ${savedWindow.workspace.id},address:${currentWindow.address}`);
-                    }
-                    commands.push(
-                        `dispatch movewindow exact ${savedWindow.at[0]} ${savedWindow.at[1]}`,
-                        `dispatch resize exact ${savedWindow.size[0]} ${savedWindow.size[1]}`
-                    );
-                    return commands;
-                }).flat();
-            })
-            .filter(cmd => cmd)
-            .join(' ; ');
+				// Pair up each savedWindow with a currentWindow by index
+				return savedWindows
+					.map((savedWindow, index) => {
+						const currentWindow = currentWindows[index];
+						if (!currentWindow) return [];
 
-        if (positionCommands) {
-            await executeHyprctl(`--batch "${positionCommands}"`);
-        }
+						const commands: string[] = [];
 
-        console.log('Session restore completed successfully');
-    } catch (error) {
-        console.error('Detailed restore error:', error);
-        throw new Error(`Failed to restore session: ${error}`);
-    }
+						// Move to workspace if specified
+						if (savedWindow.workspace?.id !== undefined) {
+							// comma-syntax: movetoworkspace <id>,address:<window-address>
+							commands.push(`dispatch movetoworkspace ${savedWindow.workspace.id},address:${currentWindow.address}`);
+						}
+
+						// If saved as floating, we can toggle it. Notice we append ,address:<addr>
+						// so we can do it in batch. If you prefer separate calls, you can do so.
+						if (savedWindow.floating) {
+							commands.push(`dispatch togglefloating,address:${currentWindow.address}`);
+						}
+
+						// Move & resize the window to exact coordinates
+						// Using "movewindowpixel exact" and "resizewindowpixel" from the older snippet
+						commands.push(`dispatch movewindowpixel exact ${savedWindow.at[0]} ${savedWindow.at[1]},address:${currentWindow.address}`);
+						commands.push(`dispatch resizewindowpixel ${savedWindow.size[0]} ${savedWindow.size[1]},address:${currentWindow.address}`);
+
+						return commands;
+					})
+					.flat(); // flatten array of arrays
+			})
+			.join(" ; ");
+
+		if (positionCommands) {
+			console.log("Positioning and resizing windows...");
+			await executeHyprctl(`--batch "${positionCommands}"`);
+		}
+
+		console.log("Session restoration complete.");
+	} catch (error) {
+		console.error("Detailed restore error:", error);
+		throw new Error(`Failed to restore session: ${error}`);
+	}
 }
+
 
 // Generate Hyprland rules for the session
 function generateSessionRules(sessionData: SessionData): string {
