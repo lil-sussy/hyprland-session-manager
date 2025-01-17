@@ -95,12 +95,12 @@ export async function restoreSession(sessionData: SessionData): Promise<void> {
 		const activeWindow = await executeHyprctl("activewindow -j").then(JSON.parse);
 
 		// 2) Close all other windows to start fresh
-		// const initialSession = await getCurrentSession();
-		// for (const w of initialSession.windows) {
-		// 	if (w.address !== activeWindow.address) {
-		// 		await executeHyprctl(`dispatch closewindow address:${w.address}`);
-		// 	}
-		// }
+		const initialSession = await getCurrentSession();
+		for (const w of initialSession.windows) {
+			if (w.address !== activeWindow.address) {
+				await executeHyprctl(`dispatch closewindow address:${w.address}`);
+			}
+		}
 
 		// 3) Group saved windows by class
 		const windowsByClass = sessionData.windows.reduce<Record<string, Window[]>>((acc, window) => {
