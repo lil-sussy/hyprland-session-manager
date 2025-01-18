@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { readFile, writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
+import { readFile as readFileSync } from 'fs/promises';
 
 const execAsync = promisify(exec);
 
@@ -17,6 +18,8 @@ interface Window {
     class: string;
     title: string;
     floating: boolean;
+    pid: number;
+    cmdline: string;
 }
 
 interface SessionData {
@@ -55,7 +58,20 @@ export async function getCurrentSession(): Promise<SessionData> {
             return { windows: [] };
         }
 
-        // console.log('Parsed windows:', windows);
+        // Add command line information for each window
+        for (const window of windows) {
+            try {
+                const pid = window.pid; // Assuming the window object has a pid property
+                const cmdlinePath = `/proc/${pid}/cmdline`;
+                const cmdline = await readFileSync(cmdlinePath, 'utf-8');
+                window.cmdline = cmdline.replace(/\0/g, ' '); // Replace null characters with spaces
+            } catch (error) {
+                console.error(`Failed to read cmdline for window with PID ${window.pid}:`, error);
+                window.cmdline = '';
+            }
+        }
+
+        // console.log('Parsed windows with cmdline:', windows);
         return { windows };
     } catch (error) {
         console.error('Error in getCurrentSession:', error);
