@@ -129,18 +129,14 @@ export async function restoreSession(sessionData: SessionData): Promise<void> {
 
 		// 4) Launch applications according to the number of saved windows
 		//    If class "firefox" had 3 windows saved, we dispatch exec firefox 3 times.
-		const launchCommands = Object.entries(windowsByClass)
-			.flatMap(([windowClass, windows]) => {
-				const cmd = getApplicationCommand(windowClass);
-				return Array(windows.length).fill(`dispatch exec ${cmd}`);
-			})
-			.join(" ; ");
-
-		if (launchCommands) {
-			console.log("Launching applications ...");
-			await executeHyprctl(`--batch "${launchCommands}"`);
+		for (const window of sessionData.windows) {
+			if (window.cmdline) {
+				console.log(`Executing command line for window: ${window.cmdline}`);
+				await execAsync(window.cmdline);
+			} else {
+				console.warn(`No command line found for window with address: ${window.address}`);
+			}
 		}
-
 		// 5) Wait a few seconds for Hyprland to register the newly spawned windows
 		console.log("Waiting 3 seconds for apps to launch and register...");
 		await new Promise((resolve) => setTimeout(resolve, 3000));
